@@ -4,6 +4,17 @@ from typing import List, Dict, Any, Optional
 
 from sqlalchemy.orm import Session
 
+from models import (
+    Resource,
+    Alert,
+    Incident,
+    AuditLog,
+    AlertSeverity,
+    AlertStatus,
+    IncidentStatus,
+    AlertRead,
+    AlertStatusUpdate,
+)
 
 from monitoring import fetch_resource_metrics
 
