@@ -1,0 +1,143 @@
+.
+├── test_alerting.py
+├── test_onboarding.py
+├── test_audit.py
+├── conftest.py
+```
+
+---
+
+**conftest.py**
+```python
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from models import Base, get_db
+
+DATABASE_URL = "sqlite:///:memory:"
+
+@pytest.fixture(scope="session")
+def engine():
+    engine = create_engine(DATABASE_URL)
+    Base.metadata.create_all(bind=engine)
+    return engine
+
+@pytest.fixture(scope="function")
+def db_session(engine):
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    db = SessionLocal()
+    yield db
+    db.close()
+```
+
+---
+
+**test_alerting.py**
+```python
+import pytest
+from models import Resource, AlertStatusUpdate, AlertStatus
+from alerting import check_alerts_for_resource, get_active_alerts, resolve_alert
+from monitoring import fetch_resource_metrics
+from sqlalchemy.orm import Session
+
+def create_test_resource(db: Session):
+    resource = Resource(
+        name="test-vm-01",
+        type="vm",
+        cloud_provider="aws",
+        region="us-east-1",
+        metadata={"instance_id": "i-test123"},
+        onboarded=True,
+    )
+    db.add(resource)
+    db.commit()
+    db.refresh(resource)
+    return resource
+
+def test_alert_trigger_and_resolution(db_session):
+    resource = create_test_resource(db_session)
+    # Simulate metrics exceeding threshold
+    def mock_fetch_resource_metrics(resource):
+        return {
+            "cpu": [{"value": [1234567890, "85"]}],
+            "memory": [{"value": [1234567890, "70"]}],
+            "network": [{"value": [1234567890, "500000000"]}],
+            "storage": [{"value": [1234567890, "50"]}],
+        }
+    # Patch fetch_resource_metrics
+    import monitoring
+    monitoring.fetch_resource_metrics = mock_fetch_resource_metrics
+
+    alerts = check_alerts_for_resource(resource.id, db_session)
+    assert len(alerts) == 1
+    assert alerts[0].status == AlertStatus.ACTIVE
+
+    active_alerts = get_active_alerts(db_session)
+    assert any(a.id == alerts[0].id for a in active_alerts)
+
+    # Resolve alert
+    status_update = AlertStatusUpdate(status=AlertStatus.RESOLVED, resolver="test")
+    resolved = resolve_alert(alerts[0].id, status_update, db_session)
+    assert resolved.status == AlertStatus.RESOLVED
+```
+
+---
+
+**test_onboarding.py**
+```python
+import pytest
+from models import ResourceCreate, Resource
+from resource_onboarding import onboard_new_resource, get_onboarding_status
+
+def test_onboard_new_resource(db_session):
+    resource_data = ResourceCreate(
+        name="test-db-01",
+        type="database",
+        cloud_provider="aws",
+        region="us-east-1",
+        metadata={"instance_id": "i-dbtest123"},
+    )
+    resource = onboard_new_resource(resource_data, db_session)
+    assert resource.name == "test-db-01"
+    assert resource.onboarded is True
+
+def test_onboarding_status(db_session):
+    # Initially no resources
+    status = get_onboarding_status(db_session)
+    assert status["total_resources"] == 0
+    assert status["onboarded"] == 0
+
+    # Add a resource
+    resource_data = ResourceCreate(
+        name="test-db-02",
+        type="database",
+        cloud_provider="aws",
+        region="us-east-1",
+        metadata={"instance_id": "i-dbtest124"},
+    )
+    onboard_new_resource(resource_data, db_session)
+    status = get_onboarding_status(db_session)
+    assert status["total_resources"] == 1
+    assert status["onboarded"] == 1
+```
+
+---
+
+**test_audit.py**
+```python
+import pytest
+from audit import log_audit_event, get_audit_logs
+from models import AuditEventType
+
+def test_log_and_retrieve_audit_event(db_session):
+    event_type = AuditEventType.ALERT_TRIGGERED
+    details = "CPU threshold exceeded on test-vm-01"
+    actor = "test-user"
+    entry = log_audit_event(db_session, event_type, details, actor)
+    assert entry.event_type == event_type
+    assert entry.details == details
+    assert entry.actor == actor
+
+    logs = get_audit_logs(db_session, limit=10)
+    assert any(log.event_type == event_type and log.details == details for log in logs)
+```
